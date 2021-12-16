@@ -1,3 +1,9 @@
+## NEXT
+
+* Fixes integration tests.
+* Updates Android compileSdkVersion to 31.
+* Fixes a flaky integration test.
+
 ## 2.2.7
 
 * Fixes a regression where dragging a [VideoProgressIndicator] while playing

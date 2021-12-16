@@ -10,12 +10,15 @@
 
 @implementation FLTWebViewFactory {
   NSObject<FlutterBinaryMessenger>* _messenger;
+  FLTCookieManager* _cookieManager;
 }
 
-- (instancetype)initWithMessenger:(NSObject<FlutterBinaryMessenger>*)messenger {
+- (instancetype)initWithMessenger:(NSObject<FlutterBinaryMessenger>*)messenger
+                    cookieManager:(FLTCookieManager*)cookieManager {
   self = [super init];
   if (self) {
     _messenger = messenger;
+    _cookieManager = cookieManager;
   }
   return self;
 }
@@ -27,6 +30,10 @@
 - (NSObject<FlutterPlatformView>*)createWithFrame:(CGRect)frame
                                    viewIdentifier:(int64_t)viewId
                                         arguments:(id _Nullable)args {
+  if (@available(iOS 11.0, *)) {
+    [_cookieManager setCookiesForData:args[@"cookies"]];
+  }
+
   FLTWebViewController* webviewController = [[FLTWebViewController alloc] initWithFrame:frame
                                                                          viewIdentifier:viewId
                                                                               arguments:args
@@ -96,6 +103,20 @@
                         inConfiguration:configuration];
 
     _webView = [[FLTWKWebView alloc] initWithFrame:frame configuration:configuration];
+
+    // Background color
+    NSNumber* backgroundColorNSNumber = args[@"backgroundColor"];
+    if ([backgroundColorNSNumber isKindOfClass:[NSNumber class]]) {
+      int backgroundColorInt = [backgroundColorNSNumber intValue];
+      UIColor* backgroundColor = [UIColor colorWithRed:(backgroundColorInt >> 16 & 0xff) / 255.0
+                                                 green:(backgroundColorInt >> 8 & 0xff) / 255.0
+                                                  blue:(backgroundColorInt & 0xff) / 255.0
+                                                 alpha:(backgroundColorInt >> 24 & 0xff) / 255.0];
+      _webView.opaque = NO;
+      _webView.backgroundColor = UIColor.clearColor;
+      _webView.scrollView.backgroundColor = backgroundColor;
+    }
+
     _navigationDelegate = [[FLTWKNavigationDelegate alloc] initWithChannel:_channel];
     _webView.UIDelegate = self;
     _webView.navigationDelegate = _navigationDelegate;
@@ -140,6 +161,12 @@
 - (void)onMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
   if ([[call method] isEqualToString:@"updateSettings"]) {
     [self onUpdateSettings:call result:result];
+  } else if ([[call method] isEqualToString:@"loadFile"]) {
+    [self onLoadFile:call result:result];
+  } else if ([[call method] isEqualToString:@"loadFlutterAsset"]) {
+    [self onLoadFlutterAsset:call result:result];
+  } else if ([[call method] isEqualToString:@"loadHtmlString"]) {
+    [self onLoadHtmlString:call result:result];
   } else if ([[call method] isEqualToString:@"loadUrl"]) {
     [self onLoadUrl:call result:result];
   } else if ([[call method] isEqualToString:@"loadRequest"]) {
@@ -190,6 +217,88 @@
     return;
   }
   result([FlutterError errorWithCode:@"updateSettings_failed" message:error details:nil]);
+}
+
+- (void)onLoadFile:(FlutterMethodCall*)call result:(FlutterResult)result {
+  NSString* error = nil;
+  if (![FLTWebViewController isValidStringArgument:[call arguments] withErrorMessage:&error]) {
+    result([FlutterError errorWithCode:@"loadFile_failed"
+                               message:@"Failed parsing file path."
+                               details:error]);
+    return;
+  }
+
+  NSURL* url = [NSURL fileURLWithPath:[call arguments] isDirectory:NO];
+
+  if (!url) {
+    NSString* errorDetails = [NSString stringWithFormat:@"Initializing NSURL with the supplied "
+                                                        @"'%@' path resulted in a nil value.",
+                                                        [call arguments]];
+    result([FlutterError errorWithCode:@"loadFile_failed"
+                               message:@"Failed parsing file path."
+                               details:errorDetails]);
+    return;
+  }
+
+  NSURL* baseUrl = [url URLByDeletingLastPathComponent];
+
+  [_webView loadFileURL:url allowingReadAccessToURL:baseUrl];
+  result(nil);
+}
+
+- (void)onLoadFlutterAsset:(FlutterMethodCall*)call result:(FlutterResult)result {
+  NSString* error = nil;
+  if (![FLTWebViewController isValidStringArgument:[call arguments] withErrorMessage:&error]) {
+    result([FlutterError errorWithCode:@"loadFlutterAsset_invalidKey"
+                               message:@"Supplied asset key is not valid."
+                               details:error]);
+    return;
+  }
+
+  NSString* assetKey = [call arguments];
+  NSString* assetFilePath = [FlutterDartProject lookupKeyForAsset:assetKey];
+  NSURL* url = [[NSBundle mainBundle] URLForResource:[assetFilePath stringByDeletingPathExtension]
+                                       withExtension:assetFilePath.pathExtension];
+
+  if (!url) {
+    result([FlutterError
+        errorWithCode:@"loadFlutterAsset_invalidKey"
+              message:@"Failed parsing file path for supplied key."
+              details:[NSString
+                          stringWithFormat:@"Failed to convert path '%@' into NSURL for key '%@'.",
+                                           assetFilePath, assetKey]]);
+    return;
+  }
+
+  [_webView loadFileURL:url allowingReadAccessToURL:[url URLByDeletingLastPathComponent]];
+  result(nil);
+}
+
+- (void)onLoadHtmlString:(FlutterMethodCall*)call result:(FlutterResult)result {
+  NSDictionary* arguments = [call arguments];
+  if (![arguments isKindOfClass:NSDictionary.class]) {
+    result([FlutterError
+        errorWithCode:@"loadHtmlString_failed"
+              message:@"Failed parsing arguments."
+              details:@"Arguments should be a dictionary containing at least a 'html' element and "
+                      @"optionally a 'baseUrl' argument. For example: `@{ @\"html\": @\"some html "
+                      @"code\", @\"baseUrl\": @\"https://flutter.dev\" }`"]);
+    return;
+  }
+
+  NSString* htmlString = [call arguments][@"html"];
+  NSString* baseUrl =
+      [call arguments][@"baseUrl"] == [NSNull null] ? nil : [call arguments][@"baseUrl"];
+  NSString* error = nil;
+  if (![FLTWebViewController isValidStringArgument:htmlString withErrorMessage:&error]) {
+    result([FlutterError errorWithCode:@"loadHtmlString_failed"
+                               message:@"Failed parsing HTML string argument."
+                               details:error]);
+    return;
+  }
+
+  [_webView loadHTMLString:htmlString baseURL:[NSURL URLWithString:baseUrl]];
+  result(nil);
 }
 
 - (void)onLoadUrl:(FlutterMethodCall*)call result:(FlutterResult)result {
@@ -554,6 +663,37 @@
   } else {
     NSLog(@"Updating UserAgent is not supported for Flutter WebViews prior to iOS 9.");
   }
+}
+
+/**
+ * Validates if the given `argument` is a non-null, non-empty string.
+ *
+ * @param argument The argument that should be validated.
+ * @param errorDetails An optional NSString variable which will contain a detailed error message in
+ * case the supplied argument is not valid.
+ * @return `YES` if the given `argument` is a valid non-null, non-empty string; otherwise `NO`.
+ */
++ (BOOL)isValidStringArgument:(id)argument withErrorMessage:(NSString**)errorDetails {
+  if (!argument) {
+    if (errorDetails) {
+      *errorDetails = @"Argument is nil.";
+    }
+    return NO;
+  }
+  if (![argument isKindOfClass:NSString.class]) {
+    if (errorDetails) {
+      *errorDetails = @"Argument is not of type NSString.";
+    }
+    return NO;
+  }
+  if (![argument length]) {
+    if (errorDetails) {
+      *errorDetails = @"Argument contains an empty string.";
+    }
+    return NO;
+  }
+
+  return YES;
 }
 
 #pragma mark WKUIDelegate
